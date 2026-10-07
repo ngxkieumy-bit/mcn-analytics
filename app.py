@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -339,24 +340,39 @@ def load_uploads():
 # =========================
 # IMPORT OVERVIEW / MONTHLY CREATOR REPORT
 # =========================
-def extract_period_from_overview(df):
-    valid = df[df["Tên người dùng của nhà sáng tạo"].astype(str).str.strip().ne(
-        ""
-    )].copy()
-    if "Ngày" not in valid.columns:
+def extract_period_from_overview(df, file_name=""):
+    # 1) Ưu tiên lấy kỳ ngay từ tên file TikTok, ví dụ:
+    # CustomReport_Creator 2026-09-01_2026-09-30.xlsx
+    name = str(file_name or "")
+    m_file = re.search(r"(\d{4}-\d{2}-\d{2})[_-](\d{4}-\d{2}-\d{2})", name)
+    if m_file:
+        return m_file.group(1), m_file.group(2)
+
+    if "Ngày" not in df.columns:
         return "", ""
+
+    valid = df.copy()
+    if "Tên người dùng của nhà sáng tạo" in valid.columns:
+        valid = valid[valid["Tên người dùng của nhà sáng tạo"].astype(str).str.strip().ne("")]
+
     vals = valid["Ngày"].astype(str).str.strip()
-    vals = vals[~vals.isin(["", "--", "nan", "NaN", "Tóm tắt", "-"])]
+    vals = vals[~vals.str.lower().isin(["", "--", "nan", "none", "tóm tắt", "-"])]
     if vals.empty:
         return "", ""
-    # Expected TikTok format: 2026-09-01-2026-09-30
-    first = vals.iloc[0]
-    m = re.match(r"(\\d{4}-\\d{2}-\\d{2})-(\\d{4}-\\d{2}-\\d{2})", first)
-    if m:
-        return m.group(1), m.group(2)
-    # fallback: parse any dates found
-    dates = pd.to_datetime(vals, errors="coerce")
-    dates = dates.dropna()
+
+    # 2) Tìm mọi chuỗi YYYY-MM-DD trong cột Ngày. Cách này chịu được
+    # các định dạng TikTok khác nhau như 2026-09-01-2026-09-30,
+    # 2026-09-01 ~ 2026-09-30 hoặc có thêm chữ.
+    found = []
+    for value in vals.tolist():
+        found.extend(re.findall(r"\d{4}-\d{2}-\d{2}", value))
+    if found:
+        dates = pd.to_datetime(pd.Series(found), errors="coerce").dropna()
+        if not dates.empty:
+            return dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
+
+    # 3) Fallback cuối cùng: pandas parse trực tiếp.
+    dates = pd.to_datetime(vals, errors="coerce").dropna()
     if not dates.empty:
         return dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
     return "", ""
@@ -391,7 +407,7 @@ def process_overview_upload(raw_bytes, file_name):
         return
 
     h = file_hash(raw_bytes)
-    period_start, period_end = extract_period_from_overview(df)
+    period_start, period_end = extract_period_from_overview(df, file_name)
 
     conn = get_conn()
     try:
