@@ -427,16 +427,9 @@ def process_overview_upload(raw_bytes, file_name):
 
         if old:
             old_id = int(old[0])
-            data_count = conn.execute(
-                "SELECT COUNT(*) FROM overview_data WHERE upload_id = ?",
-                (old_id,)
-            ).fetchone()[0]
-
-            if data_count > 0:
-                st.warning(f"File này đã được upload trước đó: {old[2]}")
-                return
-
-            # Record cũ bị lưu dở dang: xóa để upload lại sạch sẽ.
+            # Cho phép re-import cùng một file để sửa dữ liệu đã lưu từ phiên bản code cũ.
+            # Đây là file Tổng quan theo tháng, nên khi upload lại cùng file:
+            # xóa bản cũ rồi lưu lại toàn bộ dữ liệu đã parse mới nhất.
             conn.execute("DELETE FROM overview_data WHERE upload_id = ?", (old_id,))
             conn.execute("DELETE FROM uploads WHERE id = ?", (old_id,))
             conn.commit()
@@ -1194,7 +1187,7 @@ def render_dashboard():
     k2.metric("GMV", fmt_money(total_gmv))
     k3.metric("Hoa hồng ước tính NST (cột W)", fmt_money(total_creator_commission))
     k4.metric("Hoa hồng thực tế MCN", fmt_money(total_mcn))
-    st.caption("Công thức: Hoa hồng thực tế MCN = Hoa hồng ước tính NST (cột W) × % MCN.")
+    st.caption("Cột W = Hoa hồng ước tính của NST. Công thức: Hoa hồng thực tế MCN = Cột W × % MCN.")
 
     st.caption(
         f"Đang xem file: {meta['file_name']} · Upload: {meta['uploaded_at']}"
