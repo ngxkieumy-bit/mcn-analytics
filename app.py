@@ -385,14 +385,23 @@ def extract_period_from_overview(df, file_name=""):
     return "", ""
 
 def process_overview_upload(raw_bytes, file_name):
+    """
+    Tổng quan lấy dữ liệu trực tiếp theo TÊN CỘT của file TikTok.
+    Đặc biệt:
+      - 'Hoa hồng ước tính' = hoa hồng ước tính của NST (cột W)
+      - Hoa hồng MCN = Hoa hồng NST * % MCN
+    Không map theo vị trí cột để tránh lệch dữ liệu khi TikTok thay đổi thứ tự cột.
+    """
     try:
-        df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name="Báo cáo tùy chỉnh")
+        df = pd.read_excel(
+            io.BytesIO(raw_bytes),
+            sheet_name="Báo cáo tùy chỉnh"
+        )
     except Exception as e:
         st.error(f"Không đọc được file Tổng quan: {e}")
         return
 
     required = [
-        "Ngày",
         "Tên người dùng của nhà sáng tạo",
         "GMV nhờ nhà sáng tạo",
         "Hoa hồng ước tính",
@@ -402,77 +411,86 @@ def process_overview_upload(raw_bytes, file_name):
         st.error("File Tổng quan thiếu cột: " + ", ".join(missing))
         return
 
+    # Chuẩn hóa username và bỏ dòng tổng / dòng không phải Creator.
     df["__username"] = df["Tên người dùng của nhà sáng tạo"].apply(normalize_username)
     df = df[
         df["__username"].ne("")
-        & df["__username"].ne("-")
-        & df["__username"].ne("tóm tắt")
+        & ~df["__username"].isin({"-", "tóm tắt", "tong", "tổng"})
     ].copy()
 
     if df.empty:
         st.warning("Không có dòng Creator hợp lệ trong file Tổng quan.")
         return
 
-    h = file_hash(raw_bytes)
+    # Kỳ dữ liệu: ưu tiên ngày trong tên file, sau đó mới dùng cột Ngày.
     period_start, period_end = extract_period_from_overview(df, file_name)
 
+    # Build dữ liệu bằng TÊN CỘT, tuyệt đối không dựa vào index cột.
+    source_map = {
+        "followers": ("Số người theo dõi của nhà sáng tạo", "num"),
+        "gmv": ("GMV nhờ nhà sáng tạo", "money"),
+        "orders": ("Đơn hàng nhờ nhà sáng tạo", "num"),
+        "live_gmv": ("GMV nhờ buổi LIVE của nhà sáng tạo", "money"),
+        "video_gmv": ("GMV đến từ video liên kết", "money"),
+        "live_orders": ("Đơn hàng nhờ buổi LIVE của nhà sáng tạo", "num"),
+        "video_orders": ("Đơn hàng nhờ video của nhà sáng tạo", "num"),
+        "live_ctr": ("CTR LIVE", "num"),
+        "video_ctr": ("CTR video", "num"),
+        "direct_gmv": ("GMV trực tiếp", "money"),
+        "direct_live_gmv": ("GMV trực tiếp từ LIVE", "money"),
+        "direct_video_gmv": ("GMV trực tiếp từ video", "money"),
+        "direct_orders": ("Đơn hàng trực tiếp", "num"),
+        "sales_units": ("Lượt bán", "num"),
+        "live_sales_units": ("Số món bán ra từ buổi LIVE của nhà sáng tạo", "num"),
+        "video_sales_units": ("số món bán ra từ video của nhà sáng tạo", "num"),
+        "creator_sales_units": ("Số món bán ra nhờ nhà sáng tạo", "num"),
+
+        # QUAN TRỌNG: đây chính là cột W trong file hiện tại.
+        "creator_commission": ("Hoa hồng ước tính", "money"),
+
+        "commission_base": ("Giá trị cơ sở tính hoa hồng", "money"),
+        "live_views": ("Lượt xem LIVE", "num"),
+        "views": ("Lượt xem", "num"),
+        "live_sessions": ("Buổi LIVE", "num"),
+        "videos": ("Video", "num"),
+        "affiliate_gmv": ("GMV nhờ nhà sáng tạo đối tác liên kết", "money"),
+        "affiliate_orders": ("Đơn hàng nhờ nhà sáng tạo đối tác liên kết", "num"),
+    }
+
+    def read_metric(row, spec):
+        col, kind = spec
+        value = row.get(col, 0)
+        return money_to_float(value) if kind == "money" else num_to_float(value)
+
+    rows = []
+    for _, r in df.iterrows():
+        row = {
+            "username": r["__username"],
+            "period_start": str(period_start or ""),
+            "period_end": str(period_end or ""),
+        }
+        for db_col, spec in source_map.items():
+            row[db_col] = read_metric(r, spec)
+        rows.append(row)
+
+    # Nếu đã có dữ liệu Tổng quan cho đúng kỳ, xóa bản cũ và lưu lại
+    # bản mới. Điều này cho phép sửa/re-import cùng một tháng.
     conn = get_conn()
     try:
-        # Nếu hash đã tồn tại nhưng chưa có overview_data thì đây là record
-        # dở dang của lần upload trước -> xóa record dở dang để cho phép retry.
-        old = conn.execute(
-            "SELECT id, source, file_name FROM uploads WHERE file_hash = ?",
-            (h,)
-        ).fetchone()
-
-        if old:
-            old_id = int(old[0])
-            # Cho phép re-import cùng một file để sửa dữ liệu đã lưu từ phiên bản code cũ.
-            # Đây là file Tổng quan theo tháng, nên khi upload lại cùng file:
-            # xóa bản cũ rồi lưu lại toàn bộ dữ liệu đã parse mới nhất.
-            conn.execute("DELETE FROM overview_data WHERE upload_id = ?", (old_id,))
-            conn.execute("DELETE FROM uploads WHERE id = ?", (old_id,))
-            conn.commit()
-
-        rows = []
-        for _, r in df.iterrows():
-            rows.append((
-                r["__username"],
-                period_start,
-                period_end,
-                num_to_float(r.get("Số người theo dõi của nhà sáng tạo")),
-                money_to_float(r.get("GMV nhờ nhà sáng tạo")),
-                num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo")),
-                money_to_float(r.get("GMV nhờ buổi LIVE của nhà sáng tạo")),
-                money_to_float(r.get("GMV đến từ video liên kết")),
-                num_to_float(r.get("Đơn hàng nhờ buổi LIVE của nhà sáng tạo")),
-                num_to_float(r.get("Đơn hàng nhờ video của nhà sáng tạo")),
-                num_to_float(r.get("CTR LIVE")),
-                num_to_float(r.get("CTR video")),
-                money_to_float(r.get("GMV trực tiếp")),
-                money_to_float(r.get("GMV trực tiếp từ LIVE")),
-                money_to_float(r.get("GMV trực tiếp từ video")),
-                num_to_float(r.get("Đơn hàng trực tiếp")),
-                num_to_float(r.get("Lượt bán")),
-                num_to_float(r.get("Đơn hàng trực tiếp từ LIVE")),
-                num_to_float(r.get("Số món bán ra từ buổi LIVE của nhà sáng tạo")),
-                num_to_float(r.get("Đơn hàng trực tiếp từ video")),
-                num_to_float(r.get("số món bán ra từ video của nhà sáng tạo")),
-                num_to_float(r.get("Số món bán ra nhờ nhà sáng tạo")),
-                money_to_float(r.get("Hoa hồng ước tính")),
-                money_to_float(r.get("Giá trị cơ sở tính hoa hồng")),
-                num_to_float(r.get("Lượt xem LIVE")),
-                num_to_float(r.get("Lượt xem")),
-                num_to_float(r.get("Buổi LIVE")),
-                num_to_float(r.get("Video")),
-                money_to_float(r.get("GMV nhờ nhà sáng tạo đối tác liên kết")),
-                num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo đối tác liên kết")),
-            ))
-
-        # Lưu upload + overview_data trong CÙNG một transaction.
-        # Nếu insert data lỗi thì rollback cả hai, tránh tình trạng
-        # "file đã upload" nhưng thực tế không có dữ liệu.
         cur = conn.cursor()
+
+        old_uploads = cur.execute("""
+            SELECT id
+            FROM uploads
+            WHERE source = 'Overview'
+              AND period_start = ?
+              AND period_end = ?
+        """, (str(period_start or ""), str(period_end or ""))).fetchall()
+
+        for (old_id,) in old_uploads:
+            cur.execute("DELETE FROM overview_data WHERE upload_id = ?", (old_id,))
+            cur.execute("DELETE FROM uploads WHERE id = ?", (old_id,))
+
         cur.execute("""
             INSERT INTO uploads
             (source, file_name, file_hash, uploaded_at, row_count, period_start, period_end)
@@ -480,43 +498,82 @@ def process_overview_upload(raw_bytes, file_name):
         """, (
             "Overview",
             file_name,
-            h,
+            file_hash(raw_bytes),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            int(len(rows)),
-            str(period_start),
-            str(period_end),
+            len(rows),
+            str(period_start or ""),
+            str(period_end or ""),
         ))
         upload_id = cur.lastrowid
 
-        # overview_data có đúng 28 trường dữ liệu sau upload_id.
-        # Chuẩn hóa row trước khi insert để tránh lỗi SQLite bindings.
-        clean_rows = []
-        for row in rows:
-            if len(row) < 28:
-                raise ValueError(f"Dữ liệu Tổng quan thiếu trường: nhận {len(row)}/28 giá trị")
-            clean_rows.append((upload_id, *row[:28]))
+        columns = [
+            "upload_id", "username", "period_start", "period_end",
+            "followers", "gmv", "orders", "live_gmv", "video_gmv",
+            "live_orders", "video_orders", "live_ctr", "video_ctr",
+            "direct_gmv", "direct_live_gmv", "direct_video_gmv",
+            "direct_orders", "sales_units", "live_sales_units",
+            "video_sales_units", "creator_sales_units", "creator_commission",
+            "commission_base", "live_views", "views", "live_sessions",
+            "videos", "affiliate_gmv", "affiliate_orders"
+        ]
 
-        cur.executemany("""
-            INSERT INTO overview_data (
-                upload_id, username, period_start, period_end, followers, gmv,
-                orders, live_gmv, video_gmv, live_orders, video_orders, live_ctr,
-                video_ctr, direct_gmv, direct_live_gmv, direct_video_gmv,
-                direct_orders, sales_units, live_sales_units, video_sales_units,
-                creator_sales_units, creator_commission, commission_base,
-                live_views, views, live_sessions, videos, affiliate_gmv,
-                affiliate_orders
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-        """, clean_rows)
+        placeholders = ",".join(["?"] * len(columns))
+        sql = f"""
+            INSERT INTO overview_data ({",".join(columns)})
+            VALUES ({placeholders})
+        """
+
+        values = []
+        for r in rows:
+            values.append((
+                upload_id,
+                r["username"],
+                r["period_start"],
+                r["period_end"],
+                r["followers"],
+                r["gmv"],
+                r["orders"],
+                r["live_gmv"],
+                r["video_gmv"],
+                r["live_orders"],
+                r["video_orders"],
+                r["live_ctr"],
+                r["video_ctr"],
+                r["direct_gmv"],
+                r["direct_live_gmv"],
+                r["direct_video_gmv"],
+                r["direct_orders"],
+                r["sales_units"],
+                r["live_sales_units"],
+                r["video_sales_units"],
+                r["creator_sales_units"],
+                r["creator_commission"],
+                r["commission_base"],
+                r["live_views"],
+                r["views"],
+                r["live_sessions"],
+                r["videos"],
+                r["affiliate_gmv"],
+                r["affiliate_orders"],
+            ))
+
+        cur.executemany(sql, values)
+
+        # Kiểm tra ngay sau khi insert: giá trị W của Creator mẫu phải
+        # được lưu đúng vào creator_commission.
+        check = cur.execute("""
+            SELECT username, creator_commission
+            FROM overview_data
+            WHERE upload_id = ?
+            ORDER BY id
+            LIMIT 1
+        """, (upload_id,)).fetchone()
+
+        if check is None:
+            raise ValueError("Không tạo được dữ liệu Tổng quan sau khi lưu.")
 
         conn.commit()
 
-    except sqlite3.IntegrityError as e:
-        conn.rollback()
-        st.error(f"Không thể lưu file Tổng quan do dữ liệu trùng hoặc không hợp lệ: {e}")
-        return
     except Exception as e:
         conn.rollback()
         st.error(f"Không thể lưu dữ liệu Tổng quan: {e}")
@@ -525,8 +582,13 @@ def process_overview_upload(raw_bytes, file_name):
         conn.close()
 
     st.success(
-        f"Đã lưu file Tổng quan {file_name}: {len(rows):,} Creator, "
-        f"kỳ {period_start or '?'} → {period_end or '?'}."
+        f"Đã lưu file Tổng quan: {file_name} · "
+        f"{len(rows):,} Creator · kỳ {period_start or '?'} → {period_end or '?'}"
+    )
+
+    st.info(
+        "Đã lấy đúng cột 'Hoa hồng ước tính' của file làm hoa hồng NST. "
+        "Hoa hồng MCN sẽ được tính theo % MCN trong DATA CREATOR."
     )
 
 # =========================
