@@ -619,7 +619,7 @@ def render_creators():
 # =========================
 def render_live():
     st.title("🔴 LIVE ANALYTICS")
-    st.caption("Upload file Live mới tại đây. Dữ liệu được lưu cộng dồn theo từng file.")
+    st.caption("Chỉ hiển thị Creator trong Net có % MCN > 0. Dữ liệu được lưu cộng dồn theo từng file.")
 
     uploaded = st.file_uploader(
         "📤 Upload file Live mới",
@@ -655,7 +655,10 @@ def render_live():
     with c3:
         search = st.text_input("Tìm tên LIVE / username")
 
-    f = df.copy()
+    # Chỉ phân tích Creator đã khai báo trong Net và có % MCN > 0
+    active_users = {u for u, pct in get_creator_map().items() if pct > 0}
+    f = df[df["username"].isin(active_users)].copy()
+    creators = sorted([x for x in f["username"].dropna().unique() if x])
     if creator_filter:
         f = f[f["username"].isin(creator_filter)]
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -728,7 +731,7 @@ def render_live():
 # =========================
 def render_video():
     st.title("🎬 VIDEO ANALYTICS")
-    st.caption("Upload file Video mới tại đây. Hoa hồng MCN được tính theo % của từng Creator.")
+    st.caption("Chỉ hiển thị Creator trong Net có % MCN > 0. Hoa hồng MCN được tính theo % của từng Creator.")
 
     uploaded = st.file_uploader(
         "📤 Upload file Video mới",
@@ -769,7 +772,10 @@ def render_video():
     with c3:
         search = st.text_input("Tìm video / username", key="video_search")
 
-    f = df.copy()
+    # Chỉ phân tích Creator đã khai báo trong Net và có % MCN > 0
+    active_users = {u for u, pct in get_creator_map().items() if pct > 0}
+    f = df[df["username"].isin(active_users)].copy()
+    creators = sorted([x for x in f["username"].dropna().unique() if x])
     if creator_filter:
         f = f[f["username"].isin(creator_filter)]
     if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -850,6 +856,11 @@ def render_dashboard():
     video_gmv = video["gmv"].sum() if not video.empty else 0
     video_commission = video["creator_commission"].sum() if not video.empty else 0
     creator_map = get_creator_map()
+    active_users = {u for u, pct in creator_map.items() if pct > 0}
+    if not video.empty:
+        video = video[video["username"].isin(active_users)].copy()
+    if not live.empty:
+        live = live[live["username"].isin(active_users)].copy()
     video_mcn = 0
     if not video.empty:
         video_mcn = sum(
@@ -928,6 +939,102 @@ def render_history():
         st.success("Đã xóa upload và toàn bộ dữ liệu thuộc file đó.")
         st.rerun()
 
+
+# =========================
+# SETTINGS / THEME
+# =========================
+def render_settings():
+    st.title("⚙️ CÀI ĐẶT")
+    st.caption("Tùy chỉnh giao diện SINGO MCN theo phong cách tối giản.")
+
+    st.markdown("### 🎨 Giao diện")
+    theme = st.radio(
+        "Chế độ hiển thị",
+        ["☀️ Sáng", "🌙 Tối", "🌓 Theo hệ thống"],
+        horizontal=True,
+        key="theme_mode",
+    )
+
+    st.markdown("### 🖼️ Hình nền")
+    bg = st.file_uploader(
+        "Upload hình nền",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="mcn_background",
+        help="Hình nền chỉ hiển thị nhẹ phía sau nội dung.",
+    )
+
+    if bg is not None:
+        import base64
+        encoded = base64.b64encode(bg.getvalue()).decode()
+        mime = bg.type or "image/png"
+        st.session_state["mcn_bg_css"] = f"url(data:{mime};base64,{encoded})"
+        st.success("Đã áp dụng hình nền cho phiên hiện tại.")
+
+    if st.button("🗑️ Bỏ hình nền", use_container_width=False):
+        st.session_state.pop("mcn_bg_css", None)
+        st.rerun()
+
+    st.markdown("### 👀 Xem trước")
+    bg_css = st.session_state.get("mcn_bg_css")
+    preview_style = "height:180px;border-radius:14px;border:1px solid rgba(128,128,128,.25);background-size:cover;background-position:center;"
+    if bg_css:
+        preview_style += f"background-image:{bg_css};"
+    else:
+        preview_style += "background:linear-gradient(135deg,#f7f7f7,#ffffff);"
+    st.markdown(f'<div style="{preview_style}"></div>', unsafe_allow_html=True)
+
+
+def apply_theme_css():
+    mode = st.session_state.get("theme_mode", "🌓 Theo hệ thống")
+    bg_css = st.session_state.get("mcn_bg_css", "")
+
+    if mode == "☀️ Sáng":
+        theme_css = """
+        :root { color-scheme: light; }
+        .stApp { background: #ffffff; color: #111111; }
+        [data-testid="stSidebar"] { background: #f7f7f7; }
+        """
+    elif mode == "🌙 Tối":
+        theme_css = """
+        :root { color-scheme: dark; }
+        .stApp { background: #0f0f0f; color: #f5f5f5; }
+        [data-testid="stSidebar"] { background: #151515; }
+        """
+    else:
+        theme_css = """
+        :root { color-scheme: light dark; }
+        @media (prefers-color-scheme: dark) {
+            .stApp { background: #0f0f0f; color: #f5f5f5; }
+            [data-testid="stSidebar"] { background: #151515; }
+        }
+        @media (prefers-color-scheme: light) {
+            .stApp { background: #ffffff; color: #111111; }
+            [data-testid="stSidebar"] { background: #f7f7f7; }
+        }
+        """
+
+    background_css = ""
+    if bg_css:
+        background_css = f"""
+        .stApp::before {{
+            content: "";
+            position: fixed;
+            inset: 0;
+            background-image: {bg_css};
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed;
+            opacity: .08;
+            pointer-events: none;
+            z-index: 0;
+        }}
+        .stApp > div {{ position: relative; z-index: 1; }}
+        """
+
+    st.markdown(f"<style>{theme_css}{background_css}</style>", unsafe_allow_html=True)
+
+apply_theme_css()
+
 # =========================
 # SIDEBAR
 # =========================
@@ -944,6 +1051,7 @@ with st.sidebar:
             "🔴 LIVE ANALYTICS",
             "🎬 VIDEO ANALYTICS",
             "📚 Lịch sử dữ liệu",
+            "⚙️ Cài đặt",
         ],
         label_visibility="collapsed",
     )
@@ -962,3 +1070,5 @@ elif page == "🎬 VIDEO ANALYTICS":
     render_video()
 elif page == "📚 Lịch sử dữ liệu":
     render_history()
+elif page == "⚙️ Cài đặt":
+    render_settings()
