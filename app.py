@@ -5,6 +5,8 @@ import sqlite3
 import hashlib
 import io
 import re
+import json
+import base64
 from datetime import datetime, date
 from pathlib import Path
 
@@ -82,6 +84,48 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS overview_data (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            upload_id INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            period_start TEXT DEFAULT '',
+            period_end TEXT DEFAULT '',
+            followers REAL DEFAULT 0,
+            gmv REAL DEFAULT 0,
+            orders REAL DEFAULT 0,
+            live_gmv REAL DEFAULT 0,
+            video_gmv REAL DEFAULT 0,
+            live_orders REAL DEFAULT 0,
+            video_orders REAL DEFAULT 0,
+            live_ctr REAL DEFAULT 0,
+            video_ctr REAL DEFAULT 0,
+            direct_gmv REAL DEFAULT 0,
+            direct_live_gmv REAL DEFAULT 0,
+            direct_video_gmv REAL DEFAULT 0,
+            direct_orders REAL DEFAULT 0,
+            sales_units REAL DEFAULT 0,
+            live_sales_units REAL DEFAULT 0,
+            video_sales_units REAL DEFAULT 0,
+            creator_sales_units REAL DEFAULT 0,
+            creator_commission REAL DEFAULT 0,
+            commission_base REAL DEFAULT 0,
+            live_views REAL DEFAULT 0,
+            views REAL DEFAULT 0,
+            live_sessions REAL DEFAULT 0,
+            videos REAL DEFAULT 0,
+            affiliate_gmv REAL DEFAULT 0,
+            affiliate_orders REAL DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT DEFAULT ''
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS live_data (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             upload_id INTEGER NOT NULL,
@@ -118,6 +162,27 @@ def init_db():
     conn.close()
 
 init_db()
+
+def get_setting(key, default=""):
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row[0] if row else default
+
+def set_setting(key, value):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO app_settings(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value)
+    )
+    conn.commit()
+    conn.close()
+
+if "theme_mode" not in st.session_state:
+    st.session_state["theme_mode"] = get_setting("theme_mode", "🌓 Theo hệ thống")
+if "mcn_bg_css" not in st.session_state:
+    st.session_state["mcn_bg_css"] = get_setting("mcn_bg_css", "")
 
 # =========================
 # HELPERS
@@ -270,6 +335,128 @@ def load_uploads():
     )
     conn.close()
     return df
+
+# =========================
+# IMPORT OVERVIEW / MONTHLY CREATOR REPORT
+# =========================
+def extract_period_from_overview(df):
+    valid = df[df["Tên người dùng của nhà sáng tạo"].astype(str).str.strip().ne(
+        ""
+    )].copy()
+    if "Ngày" not in valid.columns:
+        return "", ""
+    vals = valid["Ngày"].astype(str).str.strip()
+    vals = vals[~vals.isin(["", "--", "nan", "NaN", "Tóm tắt", "-"])]
+    if vals.empty:
+        return "", ""
+    # Expected TikTok format: 2026-09-01-2026-09-30
+    first = vals.iloc[0]
+    m = re.match(r"(\\d{4}-\\d{2}-\\d{2})-(\\d{4}-\\d{2}-\\d{2})", first)
+    if m:
+        return m.group(1), m.group(2)
+    # fallback: parse any dates found
+    dates = pd.to_datetime(vals, errors="coerce")
+    dates = dates.dropna()
+    if not dates.empty:
+        return dates.min().strftime("%Y-%m-%d"), dates.max().strftime("%Y-%m-%d")
+    return "", ""
+
+def process_overview_upload(raw_bytes, file_name):
+    try:
+        df = pd.read_excel(io.BytesIO(raw_bytes), sheet_name="Báo cáo tùy chỉnh")
+    except Exception as e:
+        st.error(f"Không đọc được file Tổng quan: {e}")
+        return
+
+    required = [
+        "Ngày",
+        "Tên người dùng của nhà sáng tạo",
+        "GMV nhờ nhà sáng tạo",
+        "Hoa hồng ước tính",
+    ]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error("File Tổng quan thiếu cột: " + ", ".join(missing))
+        return
+
+    df["__username"] = df["Tên người dùng của nhà sáng tạo"].apply(normalize_username)
+    # Bỏ dòng Tóm tắt / dòng không phải Creator
+    df = df[
+        df["__username"].ne("")
+        & df["__username"].ne("-")
+        & df["__username"].ne("tóm tắt")
+    ].copy()
+
+    if df.empty:
+        st.warning("Không có dòng Creator hợp lệ trong file Tổng quan.")
+        return
+
+    h = file_hash(raw_bytes)
+    old = upload_exists(h)
+    if old:
+        st.warning(f"File này đã được upload trước đó: {old[2]}")
+        return
+
+    period_start, period_end = extract_period_from_overview(df)
+    upload_id = save_upload(
+        "Overview", file_name, h, len(df), period_start, period_end
+    )
+
+    rows = []
+    for _, r in df.iterrows():
+        rows.append((
+            upload_id,
+            r["__username"],
+            period_start,
+            period_end,
+            num_to_float(r.get("Số người theo dõi của nhà sáng tạo")),
+            money_to_float(r.get("GMV nhờ nhà sáng tạo")),
+            num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo")),
+            money_to_float(r.get("GMV nhờ buổi LIVE của nhà sáng tạo")),
+            money_to_float(r.get("GMV đến từ video liên kết")),
+            num_to_float(r.get("Đơn hàng nhờ buổi LIVE của nhà sáng tạo")),
+            num_to_float(r.get("Đơn hàng nhờ video của nhà sáng tạo")),
+            num_to_float(r.get("CTR LIVE")),
+            num_to_float(r.get("CTR video")),
+            money_to_float(r.get("GMV trực tiếp")),
+            money_to_float(r.get("GMV trực tiếp từ LIVE")),
+            money_to_float(r.get("GMV trực tiếp từ video")),
+            num_to_float(r.get("Đơn hàng trực tiếp")),
+            num_to_float(r.get("Lượt bán")),
+            num_to_float(r.get("Đơn hàng trực tiếp từ LIVE")),
+            num_to_float(r.get("Số món bán ra từ buổi LIVE của nhà sáng tạo")),
+            num_to_float(r.get("Đơn hàng trực tiếp từ video")),
+            num_to_float(r.get("số món bán ra từ video của nhà sáng tạo")),
+            num_to_float(r.get("Số món bán ra nhờ nhà sáng tạo")),
+            money_to_float(r.get("Hoa hồng ước tính")),
+            money_to_float(r.get("Giá trị cơ sở tính hoa hồng")),
+            num_to_float(r.get("Lượt xem LIVE")),
+            num_to_float(r.get("Lượt xem")),
+            num_to_float(r.get("Buổi LIVE")),
+            num_to_float(r.get("Video")),
+            money_to_float(r.get("GMV nhờ nhà sáng tạo đối tác liên kết")),
+            num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo đối tác liên kết")),
+        ))
+
+    conn = get_conn()
+    conn.executemany("""
+        INSERT INTO overview_data (
+            upload_id, username, period_start, period_end, followers, gmv,
+            orders, live_gmv, video_gmv, live_orders, video_orders, live_ctr,
+            video_ctr, direct_gmv, direct_live_gmv, direct_video_gmv,
+            direct_orders, sales_units, live_sales_units, video_sales_units,
+            creator_sales_units, creator_commission, commission_base,
+            live_views, views, live_sessions, videos, affiliate_gmv,
+            affiliate_orders
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, rows)
+    conn.commit()
+    conn.close()
+
+    st.success(
+        f"Đã lưu file Tổng quan {file_name}: {len(rows):,} Creator, "
+        f"kỳ {period_start or '?'} → {period_end or '?'}."
+    )
 
 # =========================
 # IMPORT VIDEO
@@ -840,70 +1027,153 @@ def render_video():
     st.dataframe(detail, use_container_width=True, hide_index=True)
 
 # =========================
-# DASHBOARD
+# DASHBOARD / MONTHLY OVERVIEW
 # =========================
+def get_overview_periods():
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT DISTINCT period_start, period_end
+        FROM overview_data
+        WHERE period_start <> ''
+        ORDER BY period_start DESC
+    """, conn)
+    conn.close()
+    return df
+
+def load_latest_overview_for_period(period_start, period_end):
+    conn = get_conn()
+    uploads = pd.read_sql_query("""
+        SELECT id, file_name, uploaded_at
+        FROM uploads
+        WHERE source = 'Overview'
+          AND period_start = ?
+          AND period_end = ?
+        ORDER BY uploaded_at DESC
+    """, conn, params=(period_start, period_end))
+    if uploads.empty:
+        conn.close()
+        return pd.DataFrame(), None
+    upload_id = int(uploads.iloc[0]["id"])
+    df = pd.read_sql_query(
+        "SELECT * FROM overview_data WHERE upload_id = ?",
+        conn, params=(upload_id,)
+    )
+    conn.close()
+    return df, uploads.iloc[0].to_dict()
+
 def render_dashboard():
     st.title("📊 TỔNG QUAN")
-    st.caption("Tổng hợp dữ liệu MCN từ Live và Video đã upload.")
+    st.caption("Nguồn dữ liệu Tổng quan là file Custom Report Creator theo từng tháng.")
 
-    conn = get_conn()
-    creators = pd.read_sql_query("SELECT * FROM creators", conn)
-    video = pd.read_sql_query("SELECT * FROM video_data", conn)
-    live = pd.read_sql_query("SELECT * FROM live_data", conn)
-    conn.close()
+    st.markdown("### 📤 Cập nhật dữ liệu Tổng quan")
+    uploaded = st.file_uploader(
+        "Upload file Tổng quan mới",
+        type=["xlsx", "xls"],
+        key="overview_upload",
+        help="File TikTok Custom Report Creator, sheet 'Báo cáo tùy chỉnh'."
+    )
+    if uploaded:
+        if st.button("🚀 Lưu dữ liệu Tổng quan", key="save_overview"):
+            process_overview_upload(uploaded.getvalue(), uploaded.name)
 
-    total_creators = len(creators)
-    video_gmv = video["gmv"].sum() if not video.empty else 0
-    video_commission = video["creator_commission"].sum() if not video.empty else 0
+    periods = get_overview_periods()
+    if periods.empty:
+        st.info("Chưa có file Tổng quan. Upload file theo tháng ở phía trên.")
+        return
+
+    labels = [
+        f"{r.period_start[:7]} ({r.period_start} → {r.period_end})"
+        for r in periods.itertuples()
+    ]
+    selected_label = st.selectbox("📅 Chọn tháng", labels, key="overview_month")
+    selected_idx = labels.index(selected_label)
+    period_start = periods.iloc[selected_idx]["period_start"]
+    period_end = periods.iloc[selected_idx]["period_end"]
+
+    df, meta = load_latest_overview_for_period(period_start, period_end)
+    if df.empty:
+        st.warning("Không có dữ liệu cho kỳ đã chọn.")
+        return
+
+    # Chỉ Creator khai báo trong Net và có % MCN > 0 mới được phân tích.
     creator_map = get_creator_map()
     active_users = {u for u, pct in creator_map.items() if pct > 0}
-    if not video.empty:
-        video = video[video["username"].isin(active_users)].copy()
-    if not live.empty:
-        live = live[live["username"].isin(active_users)].copy()
-    video_mcn = 0
-    if not video.empty:
-        video_mcn = sum(
-            row["creator_commission"] * creator_map.get(str(row["username"]).lower(), 0) / 100
-            for _, row in video.iterrows()
-        )
+    df = df[df["username"].isin(active_users)].copy()
+    df["share_percent"] = df["username"].map(creator_map).fillna(0)
+    df["mcn_commission"] = df["creator_commission"] * df["share_percent"] / 100
 
-    live_gmv = live["gmv"].sum() if not live.empty else 0
-    live_sessions = live["live_id"].nunique() if not live.empty else 0
-    video_count = video["video_id"].nunique() if not video.empty else 0
+    if df.empty:
+        st.warning("Tháng này chưa có dữ liệu của Creator có % MCN > 0.")
+        return
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Creator trong Net", fmt_number(total_creators))
-    c2.metric("GMV Live", fmt_money(live_gmv))
-    c3.metric("GMV Video", fmt_money(video_gmv))
-    c4.metric("Hoa hồng MCN", fmt_money(video_mcn))
+    total_gmv = df["gmv"].sum()
+    total_creator_commission = df["creator_commission"].sum()
+    total_mcn = df["mcn_commission"].sum()
+    creator_count = df["username"].nunique()
 
-    c5, c6, c7 = st.columns(3)
-    c5.metric("Hoa hồng NST từ Video", fmt_money(video_commission))
-    c6.metric("Số buổi LIVE", fmt_number(live_sessions))
-    c7.metric("Số Video", fmt_number(video_count))
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("NST có chia hoa hồng", fmt_number(creator_count))
+    k2.metric("GMV", fmt_money(total_gmv))
+    k3.metric("Hoa hồng NST", fmt_money(total_creator_commission))
+    k4.metric("Hoa hồng thực tế MCN", fmt_money(total_mcn))
+
+    st.caption(
+        f"Đang xem file: {meta['file_name']} · Upload: {meta['uploaded_at']}"
+    )
 
     st.divider()
 
-    if not video.empty:
-        v = video.copy()
-        v["mcn_commission"] = v.apply(
-            lambda r: r["creator_commission"] * creator_map.get(str(r["username"]).lower(), 0) / 100,
-            axis=1
+    st.markdown("### 💰 NST đã phát sinh hoa hồng trong tháng")
+    summary = (
+        df.groupby("username", as_index=False)
+        .agg(
+            GMV=("gmv", "sum"),
+            Hoa_hồng_NST=("creator_commission", "sum"),
+            **{"% MCN": ("share_percent", "first")},
+            **{"Hoa_hồng_MCN": ("mcn_commission", "sum")},
+            **{"GMV_Live": ("live_gmv", "sum")},
+            **{"GMV_Video": ("video_gmv", "sum")},
+            **{"Buổi_LIVE": ("live_sessions", "sum")},
+            Video=("videos", "sum"),
         )
-        top = (
-            v.groupby("username", as_index=False)
-            .agg(
-                GMV=("gmv", "sum"),
-                **{"Hoa hồng MCN": ("mcn_commission", "sum")}
-            )
-            .sort_values("Hoa hồng MCN", ascending=False)
-            .head(10)
-        )
-        if not top.empty:
-            st.markdown("### 🏆 Top Creator theo hoa hồng MCN từ Video")
-            chart = top.set_index("username")[["Hoa hồng MCN"]]
-            st.bar_chart(chart)
+        .sort_values("Hoa_hồng_MCN", ascending=False)
+    )
+    summary = summary.rename(columns={
+        "username": "Username",
+        "Hoa_hồng_NST": "Hoa hồng NST",
+        "Hoa_hồng_MCN": "Hoa hồng thực tế MCN",
+        "GMV_Live": "GMV Live",
+        "GMV_Video": "GMV Video",
+        "Buổi_LIVE": "Buổi LIVE",
+    })
+    st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    st.markdown("### 📈 Phân tích theo Creator")
+    c1, c2 = st.columns(2)
+    with c1:
+        chart = summary.set_index("Username")[["Hoa hồng thực tế MCN"]].head(15)
+        st.bar_chart(chart)
+    with c2:
+        gmv_chart = summary.set_index("Username")[["GMV"]].head(15)
+        st.bar_chart(gmv_chart)
+
+    st.markdown("### 📄 Dữ liệu Tổng quan chi tiết")
+    detail_cols = [
+        "username", "followers", "gmv", "orders",
+        "live_gmv", "video_gmv", "live_orders", "video_orders",
+        "live_ctr", "video_ctr", "creator_commission", "commission_base",
+        "live_views", "views", "live_sessions", "videos",
+        "share_percent", "mcn_commission"
+    ]
+    detail = df[detail_cols].copy()
+    detail.columns = [
+        "Username", "Follower", "GMV", "Đơn hàng",
+        "GMV Live", "GMV Video", "Đơn Live", "Đơn Video",
+        "CTR Live", "CTR Video", "Hoa hồng NST", "Cơ sở tính HH",
+        "Lượt xem LIVE", "Lượt xem", "Buổi LIVE", "Video",
+        "% MCN", "Hoa hồng thực tế MCN"
+    ]
+    st.dataframe(detail, use_container_width=True, hide_index=True)
 
 # =========================
 # HISTORY
@@ -945,38 +1215,51 @@ def render_history():
 # =========================
 def render_settings():
     st.title("⚙️ CÀI ĐẶT")
-    st.caption("Tùy chỉnh giao diện SINGO MCN theo phong cách tối giản.")
+    st.caption("Tối giản, sáng/tối theo lựa chọn hoặc theo giao diện máy.")
 
     st.markdown("### 🎨 Giao diện")
+    theme_options = ["☀️ Sáng", "🌙 Tối", "🌓 Theo hệ thống"]
+    current = st.session_state.get("theme_mode", "🌓 Theo hệ thống")
     theme = st.radio(
         "Chế độ hiển thị",
-        ["☀️ Sáng", "🌙 Tối", "🌓 Theo hệ thống"],
+        theme_options,
+        index=theme_options.index(current) if current in theme_options else 2,
         horizontal=True,
-        key="theme_mode",
+        key="theme_picker",
     )
+    if theme != current:
+        st.session_state["theme_mode"] = theme
+        set_setting("theme_mode", theme)
+        st.rerun()
 
     st.markdown("### 🖼️ Hình nền")
     bg = st.file_uploader(
         "Upload hình nền",
         type=["png", "jpg", "jpeg", "webp"],
         key="mcn_background",
-        help="Hình nền chỉ hiển thị nhẹ phía sau nội dung.",
+        help="Hình nền được lưu vào cấu hình app và hiển thị nhẹ phía sau nội dung."
     )
 
     if bg is not None:
-        import base64
         encoded = base64.b64encode(bg.getvalue()).decode()
         mime = bg.type or "image/png"
-        st.session_state["mcn_bg_css"] = f"url(data:{mime};base64,{encoded})"
-        st.success("Đã áp dụng hình nền cho phiên hiện tại.")
+        css_value = f"url(data:{mime};base64,{encoded})"
+        st.session_state["mcn_bg_css"] = css_value
+        set_setting("mcn_bg_css", css_value)
+        st.success("Đã lưu và áp dụng hình nền.")
 
-    if st.button("🗑️ Bỏ hình nền", use_container_width=False):
-        st.session_state.pop("mcn_bg_css", None)
+    if st.button("🗑️ Xóa hình nền", use_container_width=False):
+        st.session_state["mcn_bg_css"] = ""
+        set_setting("mcn_bg_css", "")
         st.rerun()
 
     st.markdown("### 👀 Xem trước")
-    bg_css = st.session_state.get("mcn_bg_css")
-    preview_style = "height:180px;border-radius:14px;border:1px solid rgba(128,128,128,.25);background-size:cover;background-position:center;"
+    bg_css = st.session_state.get("mcn_bg_css", "")
+    preview_style = (
+        "height:180px;border-radius:14px;"
+        "border:1px solid rgba(128,128,128,.25);"
+        "background-size:cover;background-position:center;"
+    )
     if bg_css:
         preview_style += f"background-image:{bg_css};"
     else:
@@ -1024,7 +1307,7 @@ def apply_theme_css():
             background-size: cover;
             background-position: center;
             background-attachment: fixed;
-            opacity: .08;
+            opacity: .07;
             pointer-events: none;
             z-index: 0;
         }}
