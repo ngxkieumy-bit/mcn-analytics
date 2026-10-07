@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -473,6 +472,14 @@ def process_overview_upload(raw_bytes, file_name):
         ))
         upload_id = cur.lastrowid
 
+        # overview_data có đúng 28 trường dữ liệu sau upload_id.
+        # Chuẩn hóa row trước khi insert để tránh lỗi SQLite bindings.
+        clean_rows = []
+        for row in rows:
+            if len(row) < 28:
+                raise ValueError(f"Dữ liệu Tổng quan thiếu trường: nhận {len(row)}/28 giá trị")
+            clean_rows.append((upload_id, *row[:28]))
+
         cur.executemany("""
             INSERT INTO overview_data (
                 upload_id, username, period_start, period_end, followers, gmv,
@@ -486,7 +493,7 @@ def process_overview_upload(raw_bytes, file_name):
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
-        """, [(upload_id, *row) for row in rows])
+        """, clean_rows)
 
         conn.commit()
 
