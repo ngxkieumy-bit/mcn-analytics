@@ -1216,6 +1216,7 @@ def get_overview_periods():
     conn.close()
     return df
 
+
 def load_latest_overview_for_period(period_start, period_end):
     conn = get_conn()
     uploads = pd.read_sql_query("""
@@ -1237,24 +1238,13 @@ def load_latest_overview_for_period(period_start, period_end):
     conn.close()
     return df, uploads.iloc[0].to_dict()
 
-def render_dashboard():
-    st.title("📊 TỔNG QUAN")
-    st.caption("Nguồn dữ liệu Tổng quan là file Custom Report Creator theo từng tháng.")
 
-    st.markdown("### 📤 Cập nhật dữ liệu Tổng quan")
-    uploaded = st.file_uploader(
-        "Upload file Tổng quan mới",
-        type=["xlsx", "xls"],
-        key="overview_upload",
-        help="File TikTok Custom Report Creator, sheet 'Báo cáo tùy chỉnh'."
-    )
-    if uploaded:
-        if st.button("🚀 Lưu dữ liệu Tổng quan", key="save_overview"):
-            process_overview_upload(uploaded.getvalue(), uploaded.name)
+def render_overview_analysis():
+    st.caption("Nguồn dữ liệu Tổng quan là file Custom Report Creator theo từng tháng.")
 
     periods = get_overview_periods()
     if periods.empty:
-        st.info("Chưa có file Tổng quan. Upload file theo tháng ở phía trên.")
+        st.info("Chưa có file Tổng quan. Vào tab 📥 Cập nhật dữ liệu để upload file.")
         return
 
     labels = [
@@ -1271,10 +1261,6 @@ def render_dashboard():
         st.warning("Không có dữ liệu cho kỳ đã chọn.")
         return
 
-    # Chỉ Creator khai báo trong Net và có % MCN > 0 mới được phân tích.
-    # IMPORTANT: dữ liệu overview lưu username gốc (ví dụ "hong_le_"),
-    # còn DATA CREATOR cũng có thể được nhập dưới nhiều dạng. Vì vậy
-    # đối chiếu bằng normalize_creator_key(), không dùng .isin() trực tiếp.
     creator_df = get_creators()
     if creator_df.empty:
         st.warning("Chưa có Creator trong DATA CREATOR.")
@@ -1285,6 +1271,7 @@ def render_dashboard():
         creator_df["share_percent"], errors="coerce"
     ).fillna(0)
 
+    # Chỉ Creator có % MCN > 0 mới tham gia Analytics.
     active = creator_df[creator_df["share_percent"] > 0].copy()
     active_map = {
         row["__creator_key"]: float(row["share_percent"])
@@ -1298,8 +1285,6 @@ def render_dashboard():
     df["__creator_key"] = df["username"].apply(normalize_creator_key)
     df["share_percent"] = df["__creator_key"].map(active_map).fillna(0)
     df = df[df["share_percent"] > 0].copy()
-
-    # Hiển thị username đã khai báo trong DATA CREATOR để bảng thống nhất.
     df["username"] = df["__creator_key"].map(display_name_map).fillna(df["username"])
     df["mcn_commission"] = df["creator_commission"] * df["share_percent"] / 100
 
@@ -1315,17 +1300,14 @@ def render_dashboard():
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("NST có chia hoa hồng", fmt_number(creator_count))
     k2.metric("GMV", fmt_money(total_gmv))
-    k3.metric("Hoa hồng ước tính NST (cột W)", fmt_money(total_creator_commission))
+    k3.metric("Hoa hồng ước tính NST", fmt_money(total_creator_commission))
     k4.metric("Hoa hồng thực tế MCN", fmt_money(total_mcn))
-    st.caption("Cột W = Hoa hồng ước tính của NST. Công thức: Hoa hồng thực tế MCN = Cột W × % MCN.")
-
-    st.caption(
-        f"Đang xem file: {meta['file_name']} · Upload: {meta['uploaded_at']}"
-    )
+    st.caption("Hoa hồng thực tế MCN = Hoa hồng ước tính NST (cột W) × % MCN trong DATA CREATOR.")
+    st.caption(f"Đang xem: {meta['file_name']} · Upload: {meta['uploaded_at']}")
 
     st.divider()
 
-    st.markdown("### 💰 NST đã phát sinh hoa hồng trong tháng")
+    # Bảng chính: Creator có phát sinh hoa hồng trong tháng.
     summary = (
         df.groupby("username", as_index=False)
         .agg(
@@ -1335,29 +1317,31 @@ def render_dashboard():
             **{"Hoa_hồng_MCN": ("mcn_commission", "sum")},
             **{"GMV_Live": ("live_gmv", "sum")},
             **{"GMV_Video": ("video_gmv", "sum")},
-            **{"Buổi_LIVE": ("live_sessions", "sum")},
-            Video=("videos", "sum"),
         )
         .sort_values("Hoa_hồng_MCN", ascending=False)
     )
     summary = summary.rename(columns={
-        "username": "Username",
+        "username": "NST",
         "Hoa_hồng_NST": "Hoa hồng ước tính NST",
         "Hoa_hồng_MCN": "Hoa hồng thực tế MCN",
         "GMV_Live": "GMV Live",
         "GMV_Video": "GMV Video",
-        "Buổi_LIVE": "Buổi LIVE",
     })
+
+    st.markdown("### 💰 Hoa hồng theo Creator")
     st.dataframe(summary, use_container_width=True, hide_index=True)
 
-    st.markdown("### 📈 Phân tích theo Creator")
-    c1, c2 = st.columns(2)
-    with c1:
-        chart = summary.set_index("Username")[["Hoa hồng thực tế MCN"]].head(15)
-        st.bar_chart(chart)
-    with c2:
-        gmv_chart = summary.set_index("Username")[["GMV"]].head(15)
-        st.bar_chart(gmv_chart)
+    # Top Creator: bảng, không dùng biểu đồ để tiết kiệm diện tích.
+    st.markdown("### 🏆 Top Creator theo GMV")
+    top_creator = (
+        summary[["NST", "GMV", "Hoa hồng ước tính NST", "% MCN", "Hoa hồng thực tế MCN"]]
+        .sort_values("GMV", ascending=False)
+        .head(10)
+        .reset_index(drop=True)
+    )
+    st.dataframe(top_creator, use_container_width=True, hide_index=True)
+
+    st.info("📦 Top sản phẩm theo GMV sẽ được bổ sung khi upload file Product trong tab 📥 Cập nhật dữ liệu.")
 
     st.markdown("### 📄 Dữ liệu Tổng quan chi tiết")
     detail_cols = [
@@ -1376,6 +1360,47 @@ def render_dashboard():
         "% MCN", "Hoa hồng thực tế MCN"
     ]
     st.dataframe(detail, use_container_width=True, hide_index=True)
+
+
+def render_overview_update():
+    st.markdown("### 📥 Cập nhật dữ liệu")
+    st.caption("Upload dữ liệu nguồn tại đây. Trang 📈 Phân tích chỉ dùng để xem dashboard.")
+
+    st.markdown("#### 📊 1. Overview Creator")
+    st.caption("File TikTok Custom Report Creator · sheet 'Báo cáo tùy chỉnh'.")
+    uploaded = st.file_uploader(
+        "Upload file Tổng quan Creator",
+        type=["xlsx", "xls"],
+        key="overview_upload",
+        help="Ví dụ: CustomReport_Creator 2026-09-01_2026-09-30.xlsx"
+    )
+    if uploaded:
+        if st.button("🚀 Lưu dữ liệu Tổng quan", key="save_overview"):
+            process_overview_upload(uploaded.getvalue(), uploaded.name)
+
+    st.divider()
+
+    st.markdown("#### 📦 2. Product")
+    st.caption("File Product sẽ dùng riêng để xếp hạng sản phẩm theo GMV. Chưa xử lý dữ liệu cho đến khi xác định đúng cấu trúc cột của file Product.")
+    product_upload = st.file_uploader(
+        "Upload file Product (chuẩn bị)",
+        type=["xlsx", "xls", "csv"],
+        key="product_upload",
+    )
+    if product_upload:
+        st.info("Đã nhận file Product. Khi có file mẫu thực tế, mình sẽ map đúng cột và thêm lưu trữ + Top Product theo GMV.")
+        st.dataframe(pd.DataFrame({"Tên file": [product_upload.name], "Kích thước": [f"{len(product_upload.getvalue())/1024:.1f} KB"]}), hide_index=True, use_container_width=True)
+
+
+def render_dashboard():
+    st.title("📊 TỔNG QUAN")
+    tab_analysis, tab_update = st.tabs(["📈 Phân tích", "📥 Cập nhật dữ liệu"])
+
+    with tab_analysis:
+        render_overview_analysis()
+
+    with tab_update:
+        render_overview_update()
 
 # =========================
 # HISTORY
