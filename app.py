@@ -1328,10 +1328,7 @@ def render_overview_analysis():
         "GMV_Video": "GMV Video",
     })
 
-    st.markdown("### 💰 Hoa hồng theo Creator")
-    st.dataframe(summary, use_container_width=True, hide_index=True)
-
-    # Top Creator: bảng, không dùng biểu đồ để tiết kiệm diện tích.
+    # Top Creator: chỉ giữ bảng xếp hạng, không hiển thị thêm bảng "Hoa hồng theo Creator".
     st.markdown("### 🏆 Top Creator theo GMV")
     top_creator = (
         summary[["NST", "GMV", "Hoa hồng ước tính NST", "% MCN", "Hoa hồng thực tế MCN"]]
@@ -1341,7 +1338,9 @@ def render_overview_analysis():
     )
     st.dataframe(top_creator, use_container_width=True, hide_index=True)
 
-    st.info("📦 Top sản phẩm theo GMV sẽ được bổ sung khi upload file Product trong tab 📥 Cập nhật dữ liệu.")
+    # Top Product: dữ liệu lấy từ file Product riêng, không lấy từ Overview/Live/Video.
+    st.markdown("### 📦 Top sản phẩm theo GMV")
+    st.info("Chưa có dữ liệu Product. Vào 📥 Cập nhật dữ liệu để upload file Product.")
 
     st.markdown("### 📄 Dữ liệu Tổng quan chi tiết")
     detail_cols = [
