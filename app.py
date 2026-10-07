@@ -198,13 +198,20 @@ def money_to_float(x):
     s = str(x).strip()
     if not s or s.lower() in {"nan", "none", "--", "-"}:
         return 0.0
+    # TikTok Excel exports may contain strings such as 1.802.371.690₫.
+    # Keep only the numeric part and treat dots as thousand separators.
     s = s.replace("₫", "").replace("đ", "").replace("Đ", "")
-    s = s.replace(" ", "")
-    # TikTok exports Vietnamese currency as 175.921.083
-    if re.fullmatch(r"-?\d{1,3}(\.\d{3})+", s):
+    s = s.replace("\u00a0", "").replace(" ", "")
+    s = re.sub(r"[^0-9.\-]", "", s)
+    if not s:
+        return 0.0
+    # Vietnamese/TikTok currency format: 1.802.371.690 -> 1802371690
+    if s.count(".") > 1:
         s = s.replace(".", "")
-    else:
-        s = s.replace(",", "")
+    elif "." in s:
+        left, right = s.split(".", 1)
+        if len(right) == 3:
+            s = left + right
     try:
         return float(s)
     except Exception:
@@ -1076,7 +1083,7 @@ def render_video():
         st.dataframe(
             by_creator.rename(columns={
                 "username": "Username",
-                "Hoa_hồng_NST": "Hoa hồng NST",
+                "Hoa_hồng_NST": "Hoa hồng ước tính NST",
                 "Hoa_hồng_MCN": "Hoa hồng thực tế MCN",
                 "Lượt_xem": "Lượt xem",
             }),
@@ -1185,8 +1192,9 @@ def render_dashboard():
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("NST có chia hoa hồng", fmt_number(creator_count))
     k2.metric("GMV", fmt_money(total_gmv))
-    k3.metric("Hoa hồng NST", fmt_money(total_creator_commission))
+    k3.metric("Hoa hồng ước tính NST (cột W)", fmt_money(total_creator_commission))
     k4.metric("Hoa hồng thực tế MCN", fmt_money(total_mcn))
+    st.caption("Công thức: Hoa hồng thực tế MCN = Hoa hồng ước tính NST (cột W) × % MCN.")
 
     st.caption(
         f"Đang xem file: {meta['file_name']} · Upload: {meta['uploaded_at']}"
@@ -1211,7 +1219,7 @@ def render_dashboard():
     )
     summary = summary.rename(columns={
         "username": "Username",
-        "Hoa_hồng_NST": "Hoa hồng NST",
+        "Hoa_hồng_NST": "Hoa hồng ước tính NST",
         "Hoa_hồng_MCN": "Hoa hồng thực tế MCN",
         "GMV_Live": "GMV Live",
         "GMV_Video": "GMV Video",
@@ -1240,7 +1248,7 @@ def render_dashboard():
     detail.columns = [
         "Username", "Follower", "GMV", "Đơn hàng",
         "GMV Live", "GMV Video", "Đơn Live", "Đơn Video",
-        "CTR Live", "CTR Video", "Hoa hồng NST", "Cơ sở tính HH",
+        "CTR Live", "CTR Video", "Hoa hồng ước tính NST (cột W)", "Cơ sở tính HH",
         "Lượt xem LIVE", "Lượt xem", "Buổi LIVE", "Video",
         "% MCN", "Hoa hồng thực tế MCN"
     ]
