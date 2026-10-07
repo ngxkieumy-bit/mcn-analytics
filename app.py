@@ -295,12 +295,22 @@ def get_creator_map():
     if df.empty:
         return {}
     return {
-        str(r["username"]).strip().lower(): float(r["share_percent"] or 0)
+        normalize_creator_key(r["username"]): float(r["share_percent"] or 0)
         for _, r in df.iterrows()
     }
 
 def normalize_username(x):
     return clean_text(x).lstrip("@").lower()
+
+def normalize_creator_key(x):
+    """Chuẩn hóa username để đối chiếu Creator giữa DATA CREATOR và file TikTok."""
+    s = clean_text(x).lstrip("@").strip().lower()
+    import unicodedata
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
+    s = s.replace("đ", "d")
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
 
 def upload_exists(filehash):
     conn = get_conn()
@@ -644,7 +654,7 @@ def process_video_upload(raw_bytes, file_name):
     for _, r in df.iterrows():
         username = r["__username"]
         commission = money_to_float(r.get("Hoa hồng ước tính", 0))
-        share = creator_map.get(username, 0)
+        share = creator_map.get(normalize_creator_key(username), 0)
         # MCN actual commission = Creator commission (W) x MCN share %
         mcn_commission = commission * share / 100.0
 
@@ -933,6 +943,39 @@ def render_creators():
             conn.close()
             st.success(f"Đã cập nhật @{selected} = {new_share:g}%")
             st.rerun()
+
+        st.markdown("### 🗑️ Xóa Creator")
+        st.caption("Xóa Creator khỏi DATA CREATOR. Dữ liệu Live/Video/Tổng quan đã lưu không bị xóa.")
+        delete_creator = st.selectbox(
+            "Chọn Creator cần xóa",
+            df["username"].tolist(),
+            format_func=lambda x: "@" + x,
+            key="delete_creator_select"
+        )
+        confirm_delete = st.checkbox(
+            f"Tôi chắc chắn muốn xóa @{delete_creator}",
+            key="confirm_delete_creator"
+        )
+        if st.button("🗑️ Xóa Creator", type="secondary", disabled=not confirm_delete):
+            conn = get_conn()
+            conn.execute("DELETE FROM creators WHERE username = ?", (delete_creator,))
+            conn.commit()
+            conn.close()
+            st.success(f"Đã xóa @{delete_creator} khỏi DATA CREATOR.")
+            st.rerun()
+
+def get_active_creator_keys():
+    creators = get_creators()
+    if creators.empty:
+        return {}
+    active = creators[creators["share_percent"].astype(float) > 0]
+    return {
+        normalize_creator_key(r["username"]): {
+            "username": r["username"],
+            "share_percent": float(r["share_percent"] or 0),
+        }
+        for _, r in active.iterrows()
+    }
 
 # =========================
 # LIVE ANALYTICS
