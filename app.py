@@ -1272,10 +1272,35 @@ def render_dashboard():
         return
 
     # Chỉ Creator khai báo trong Net và có % MCN > 0 mới được phân tích.
-    creator_map = get_creator_map()
-    active_users = {u for u, pct in creator_map.items() if pct > 0}
-    df = df[df["username"].isin(active_users)].copy()
-    df["share_percent"] = df["username"].map(creator_map).fillna(0)
+    # IMPORTANT: dữ liệu overview lưu username gốc (ví dụ "hong_le_"),
+    # còn DATA CREATOR cũng có thể được nhập dưới nhiều dạng. Vì vậy
+    # đối chiếu bằng normalize_creator_key(), không dùng .isin() trực tiếp.
+    creator_df = get_creators()
+    if creator_df.empty:
+        st.warning("Chưa có Creator trong DATA CREATOR.")
+        return
+
+    creator_df["__creator_key"] = creator_df["username"].apply(normalize_creator_key)
+    creator_df["share_percent"] = pd.to_numeric(
+        creator_df["share_percent"], errors="coerce"
+    ).fillna(0)
+
+    active = creator_df[creator_df["share_percent"] > 0].copy()
+    active_map = {
+        row["__creator_key"]: float(row["share_percent"])
+        for _, row in active.iterrows()
+    }
+    display_name_map = {
+        row["__creator_key"]: row["username"]
+        for _, row in active.iterrows()
+    }
+
+    df["__creator_key"] = df["username"].apply(normalize_creator_key)
+    df["share_percent"] = df["__creator_key"].map(active_map).fillna(0)
+    df = df[df["share_percent"] > 0].copy()
+
+    # Hiển thị username đã khai báo trong DATA CREATOR để bảng thống nhất.
+    df["username"] = df["__creator_key"].map(display_name_map).fillna(df["username"])
     df["mcn_commission"] = df["creator_commission"] * df["share_percent"] / 100
 
     if df.empty:
