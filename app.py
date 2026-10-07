@@ -322,6 +322,7 @@ def save_upload(source, file_name, filehash, row_count, period_start="", period_
 
 def delete_upload(upload_id):
     conn = get_conn()
+    conn.execute("DELETE FROM overview_data WHERE upload_id = ?", (upload_id,))
     conn.execute("DELETE FROM video_data WHERE upload_id = ?", (upload_id,))
     conn.execute("DELETE FROM live_data WHERE upload_id = ?", (upload_id,))
     conn.execute("DELETE FROM uploads WHERE id = ?", (upload_id,))
@@ -380,7 +381,6 @@ def process_overview_upload(raw_bytes, file_name):
         return
 
     df["__username"] = df["Tên người dùng của nhà sáng tạo"].apply(normalize_username)
-    # Bỏ dòng Tóm tắt / dòng không phải Creator
     df = df[
         df["__username"].ne("")
         & df["__username"].ne("-")
@@ -392,66 +392,114 @@ def process_overview_upload(raw_bytes, file_name):
         return
 
     h = file_hash(raw_bytes)
-    old = upload_exists(h)
-    if old:
-        st.warning(f"File này đã được upload trước đó: {old[2]}")
-        return
-
     period_start, period_end = extract_period_from_overview(df)
-    upload_id = save_upload(
-        "Overview", file_name, h, len(df), period_start, period_end
-    )
-
-    rows = []
-    for _, r in df.iterrows():
-        rows.append((
-            upload_id,
-            r["__username"],
-            period_start,
-            period_end,
-            num_to_float(r.get("Số người theo dõi của nhà sáng tạo")),
-            money_to_float(r.get("GMV nhờ nhà sáng tạo")),
-            num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo")),
-            money_to_float(r.get("GMV nhờ buổi LIVE của nhà sáng tạo")),
-            money_to_float(r.get("GMV đến từ video liên kết")),
-            num_to_float(r.get("Đơn hàng nhờ buổi LIVE của nhà sáng tạo")),
-            num_to_float(r.get("Đơn hàng nhờ video của nhà sáng tạo")),
-            num_to_float(r.get("CTR LIVE")),
-            num_to_float(r.get("CTR video")),
-            money_to_float(r.get("GMV trực tiếp")),
-            money_to_float(r.get("GMV trực tiếp từ LIVE")),
-            money_to_float(r.get("GMV trực tiếp từ video")),
-            num_to_float(r.get("Đơn hàng trực tiếp")),
-            num_to_float(r.get("Lượt bán")),
-            num_to_float(r.get("Đơn hàng trực tiếp từ LIVE")),
-            num_to_float(r.get("Số món bán ra từ buổi LIVE của nhà sáng tạo")),
-            num_to_float(r.get("Đơn hàng trực tiếp từ video")),
-            num_to_float(r.get("số món bán ra từ video của nhà sáng tạo")),
-            num_to_float(r.get("Số món bán ra nhờ nhà sáng tạo")),
-            money_to_float(r.get("Hoa hồng ước tính")),
-            money_to_float(r.get("Giá trị cơ sở tính hoa hồng")),
-            num_to_float(r.get("Lượt xem LIVE")),
-            num_to_float(r.get("Lượt xem")),
-            num_to_float(r.get("Buổi LIVE")),
-            num_to_float(r.get("Video")),
-            money_to_float(r.get("GMV nhờ nhà sáng tạo đối tác liên kết")),
-            num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo đối tác liên kết")),
-        ))
 
     conn = get_conn()
-    conn.executemany("""
-        INSERT INTO overview_data (
-            upload_id, username, period_start, period_end, followers, gmv,
-            orders, live_gmv, video_gmv, live_orders, video_orders, live_ctr,
-            video_ctr, direct_gmv, direct_live_gmv, direct_video_gmv,
-            direct_orders, sales_units, live_sales_units, video_sales_units,
-            creator_sales_units, creator_commission, commission_base,
-            live_views, views, live_sessions, videos, affiliate_gmv,
-            affiliate_orders
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, rows)
-    conn.commit()
-    conn.close()
+    try:
+        # Nếu hash đã tồn tại nhưng chưa có overview_data thì đây là record
+        # dở dang của lần upload trước -> xóa record dở dang để cho phép retry.
+        old = conn.execute(
+            "SELECT id, source, file_name FROM uploads WHERE file_hash = ?",
+            (h,)
+        ).fetchone()
+
+        if old:
+            old_id = int(old[0])
+            data_count = conn.execute(
+                "SELECT COUNT(*) FROM overview_data WHERE upload_id = ?",
+                (old_id,)
+            ).fetchone()[0]
+
+            if data_count > 0:
+                st.warning(f"File này đã được upload trước đó: {old[2]}")
+                return
+
+            # Record cũ bị lưu dở dang: xóa để upload lại sạch sẽ.
+            conn.execute("DELETE FROM overview_data WHERE upload_id = ?", (old_id,))
+            conn.execute("DELETE FROM uploads WHERE id = ?", (old_id,))
+            conn.commit()
+
+        rows = []
+        for _, r in df.iterrows():
+            rows.append((
+                r["__username"],
+                period_start,
+                period_end,
+                num_to_float(r.get("Số người theo dõi của nhà sáng tạo")),
+                money_to_float(r.get("GMV nhờ nhà sáng tạo")),
+                num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo")),
+                money_to_float(r.get("GMV nhờ buổi LIVE của nhà sáng tạo")),
+                money_to_float(r.get("GMV đến từ video liên kết")),
+                num_to_float(r.get("Đơn hàng nhờ buổi LIVE của nhà sáng tạo")),
+                num_to_float(r.get("Đơn hàng nhờ video của nhà sáng tạo")),
+                num_to_float(r.get("CTR LIVE")),
+                num_to_float(r.get("CTR video")),
+                money_to_float(r.get("GMV trực tiếp")),
+                money_to_float(r.get("GMV trực tiếp từ LIVE")),
+                money_to_float(r.get("GMV trực tiếp từ video")),
+                num_to_float(r.get("Đơn hàng trực tiếp")),
+                num_to_float(r.get("Lượt bán")),
+                num_to_float(r.get("Đơn hàng trực tiếp từ LIVE")),
+                num_to_float(r.get("Số món bán ra từ buổi LIVE của nhà sáng tạo")),
+                num_to_float(r.get("Đơn hàng trực tiếp từ video")),
+                num_to_float(r.get("số món bán ra từ video của nhà sáng tạo")),
+                num_to_float(r.get("Số món bán ra nhờ nhà sáng tạo")),
+                money_to_float(r.get("Hoa hồng ước tính")),
+                money_to_float(r.get("Giá trị cơ sở tính hoa hồng")),
+                num_to_float(r.get("Lượt xem LIVE")),
+                num_to_float(r.get("Lượt xem")),
+                num_to_float(r.get("Buổi LIVE")),
+                num_to_float(r.get("Video")),
+                money_to_float(r.get("GMV nhờ nhà sáng tạo đối tác liên kết")),
+                num_to_float(r.get("Đơn hàng nhờ nhà sáng tạo đối tác liên kết")),
+            ))
+
+        # Lưu upload + overview_data trong CÙNG một transaction.
+        # Nếu insert data lỗi thì rollback cả hai, tránh tình trạng
+        # "file đã upload" nhưng thực tế không có dữ liệu.
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO uploads
+            (source, file_name, file_hash, uploaded_at, row_count, period_start, period_end)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Overview",
+            file_name,
+            h,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            int(len(rows)),
+            str(period_start),
+            str(period_end),
+        ))
+        upload_id = cur.lastrowid
+
+        cur.executemany("""
+            INSERT INTO overview_data (
+                upload_id, username, period_start, period_end, followers, gmv,
+                orders, live_gmv, video_gmv, live_orders, video_orders, live_ctr,
+                video_ctr, direct_gmv, direct_live_gmv, direct_video_gmv,
+                direct_orders, sales_units, live_sales_units, video_sales_units,
+                creator_sales_units, creator_commission, commission_base,
+                live_views, views, live_sessions, videos, affiliate_gmv,
+                affiliate_orders
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+        """, [(upload_id, *row) for row in rows])
+
+        conn.commit()
+
+    except sqlite3.IntegrityError as e:
+        conn.rollback()
+        st.error(f"Không thể lưu file Tổng quan do dữ liệu trùng hoặc không hợp lệ: {e}")
+        return
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Không thể lưu dữ liệu Tổng quan: {e}")
+        return
+    finally:
+        conn.close()
 
     st.success(
         f"Đã lưu file Tổng quan {file_name}: {len(rows):,} Creator, "
